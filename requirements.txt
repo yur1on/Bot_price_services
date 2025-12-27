@@ -14,3 +14,4 @@ propcache==0.4.1
 pytz==2025.2
 typing_extensions==4.15.0
 yarl==1.22.0
+aiogram==2.25.1

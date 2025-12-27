@@ -1,9 +1,7 @@
 services:
   bot:
     build: .
-    container_name: bot_display
+    container_name: bot_price_services
     restart: unless-stopped
-    env_file:
-      - .env
     volumes:
       - ./data:/app/data
