@@ -1,0 +1,3 @@
+# токен бота
+# API_TOKEN = '5851318234:AAETu8A7RmnNXdrUbVABoUqMe4c_8cSSlpw'
+ADMIN_ID = 486747175
