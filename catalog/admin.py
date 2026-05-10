@@ -1,26 +1,71 @@
+from django import forms
 from django.contrib import admin
 
 from .models import BotContent, Device, DisplayOption, QueryLog, TelegramUser
 
 
+class DeviceAdminForm(forms.ModelForm):
+    class Meta:
+        model = Device
+        fields = (
+            "model_name",
+            "glass_replacement_price",
+            "glass_replacement_without_disassembly_price",
+            "turnkey_price",
+            "needs_risk_confirmation",
+            "success_rate",
+            "is_active",
+            "brand",
+        )
+
+
 class DisplayOptionInline(admin.TabularInline):
     model = DisplayOption
     extra = 0
+    verbose_name = "Дисплей"
+    verbose_name_plural = "Дисплеи в наличии"
+    fields = ("display_type", "price", "stock")
 
 
 @admin.register(Device)
 class DeviceAdmin(admin.ModelAdmin):
+    form = DeviceAdminForm
     list_display = (
         "model_name",
-        "brand",
         "glass_replacement_price",
         "glass_replacement_without_disassembly_price",
         "turnkey_price",
+        "needs_risk_confirmation",
+        "success_rate",
         "is_active",
     )
-    list_filter = ("brand", "is_active")
+    list_filter = ("is_active", "brand")
     search_fields = ("model_name", "normalized_name")
     inlines = [DisplayOptionInline]
+    fieldsets = (
+        (
+            None,
+            {
+                "fields": (
+                    "model_name",
+                    "glass_replacement_price",
+                    "glass_replacement_without_disassembly_price",
+                    "turnkey_price",
+                    "needs_risk_confirmation",
+                    "success_rate",
+                    "is_active",
+                )
+            },
+        ),
+        (
+            "Дополнительно",
+            {
+                "fields": ("brand",),
+                "classes": ("collapse",),
+                "description": "Бренд можно не заполнять: он подставится автоматически из названия модели.",
+            },
+        ),
+    )
 
 
 @admin.register(TelegramUser)
@@ -36,13 +81,6 @@ class QueryLogAdmin(admin.ModelAdmin):
     list_display = ("telegram_id", "query", "created_at")
     search_fields = ("telegram_id", "query")
     list_filter = ("created_at",)
-
-
-@admin.register(DisplayOption)
-class DisplayOptionAdmin(admin.ModelAdmin):
-    list_display = ("device", "display_type", "price", "stock")
-    list_filter = ("display_type",)
-    search_fields = ("device__model_name",)
 
 
 @admin.register(BotContent)

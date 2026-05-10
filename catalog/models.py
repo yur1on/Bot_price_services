@@ -1,4 +1,5 @@
 from django.db import models
+from django.core.validators import MaxValueValidator, MinValueValidator
 
 
 class Device(models.Model):
@@ -23,6 +24,14 @@ class Device(models.Model):
         null=True,
         blank=True,
         help_text="Оставьте пустым, если цена договорная.",
+    )
+    needs_risk_confirmation = models.BooleanField("Согласовывайте риски с клиентом", default=False)
+    success_rate = models.PositiveSmallIntegerField(
+        "Процент успеха",
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Укажите вероятность успеха в процентах, например 90 или 50.",
     )
     is_active = models.BooleanField("Активно", default=True)
 

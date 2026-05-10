@@ -172,6 +172,15 @@ async def send_search_results(message: types.Message, user_input: str, offset: i
             else:
                 lines.append("✅ <b>Переклейка под ключ:</b> договорная")
 
+            if device.needs_risk_confirmation:
+                if device.success_rate is not None:
+                    lines.append(
+                        f"⚠️ <b>Согласовывайте риски с клиентом.</b> "
+                        f"Процент успеха: <b>{device.success_rate}%</b>"
+                    )
+                else:
+                    lines.append("⚠️ <b>Согласовывайте риски с клиентом</b>")
+
             display_lines = []
             for display in device.display_options.all():
                 if display.stock <= 0:
@@ -236,9 +245,8 @@ async def send_welcome(message: types.Message):
 
     if await is_user_blocked(user_id):
         await message.reply(
-            "Вы не можете использовать этого бота.\n"
-            "Вы были ограничены администратором.\n"
-            "Для разблокировки напишите @Yur1on",
+            "Для доступа к прайсу напишите @Yur1on.\n"
+            "После проверки вас добавят к пользованию ботом.",
         )
         return
 
@@ -255,9 +263,8 @@ async def price_query(message: types.Message):
 
     if await is_user_blocked(user_id):
         await message.reply(
-            "Вы не можете использовать этого бота.\n"
-            "Вы были ограничены администратором.\n"
-            "Для разблокировки напишите @Yur1on",
+            "Для доступа к прайсу напишите @Yur1on.\n"
+            "После проверки вас добавят к пользованию ботом.",
         )
         return
 
