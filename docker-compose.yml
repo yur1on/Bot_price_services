@@ -3,5 +3,19 @@ services:
     build: .
     container_name: bot_price_services
     restart: unless-stopped
+    command: python app.py
+    environment:
+      SQLITE_PATH: /app/data/db.sqlite3
+    volumes:
+      - ./data:/app/data
+  web:
+    build: .
+    container_name: bot_price_admin
+    restart: unless-stopped
+    command: python manage.py runserver 0.0.0.0:8000
+    environment:
+      SQLITE_PATH: /app/data/db.sqlite3
+    ports:
+      - "8000:8000"
     volumes:
       - ./data:/app/data

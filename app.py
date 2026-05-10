@@ -1,255 +1,302 @@
-
 import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ParseMode
-from aiogram.contrib.middlewares.logging import LoggingMiddleware
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.utils import executor
-import sqlite3
-from baza_glass import prices
-from baza_lcd import displays
-from baza_lcd_kit import displays1
-from config import API_TOKEN, ADMIN_ID  # Добавляем ID администратора в конфигурационный файл
+import os
+from html import escape
 
-# Конфигурация логирования
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "newbot.settings")
+
+import django
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.contrib.middlewares.logging import LoggingMiddleware
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
+from aiogram.utils import executor
+from asgiref.sync import sync_to_async
+
+from config import ADMIN_ID, API_TOKEN
+
+django.setup()
+
+from catalog.models import BotContent, QueryLog, TelegramUser, normalize_text
+from catalog.services import search_devices_with_total
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+PAGE_SIZE = 4
+pagination_state = {}
 
-# Инициализация бота и диспетчера
 bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 dp.middleware.setup(LoggingMiddleware())
 
-# Подключение к базе данных SQLite
-conn = sqlite3.connect('user_queries.db')
-cursor = conn.cursor()
 
-# Создание таблиц для хранения запросов, информации о пользователях и заблокированных пользователей
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS queries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    query TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-''')
-
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    name TEXT,
-    address TEXT
-)
-''')
-
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS blocked_users (
-    user_id INTEGER PRIMARY KEY
-)
-''')
-
-conn.commit()
-
-# Логирование запросов пользователя
-def log_user_query(user_id, query):
-    cursor.execute('INSERT INTO queries (user_id, query) VALUES (?, ?)', (user_id, query))
-    conn.commit()
-
-# Проверка на наличие кириллических символов
 def contains_cyrillic(text):
-    return any('\u0400' <= char <= '\u04FF' for char in text)
+    return any("\u0400" <= char <= "\u04FF" for char in text)
 
-# Нормализация текста
-def normalize_text(text):
-    return text.lower().replace(" ", "")
 
-# Проверка, зарегистрирован ли пользователь
-def is_user_registered(user_id):
-    cursor.execute('SELECT 1 FROM users WHERE user_id = ?', (user_id,))
-    return cursor.fetchone() is not None
+def format_price(value):
+    if value is None:
+        return "договорная"
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
 
-# Проверка, заблокирован ли пользователь
+
+def get_more_inline_keyboard(offset: int):
+    keyboard = InlineKeyboardMarkup()
+    keyboard.add(InlineKeyboardButton("Еще 4", callback_data=f"more:{offset}"))
+    return keyboard
+
+
+@sync_to_async
+def log_user_query(user_id, query):
+    user = TelegramUser.objects.filter(telegram_id=user_id).first()
+    QueryLog.objects.create(user=user, telegram_id=user_id, query=query)
+
+
+@sync_to_async
 def is_user_blocked(user_id):
-    cursor.execute('SELECT 1 FROM blocked_users WHERE user_id = ?', (user_id,))
-    return cursor.fetchone() is not None
+    return TelegramUser.objects.filter(telegram_id=user_id, is_blocked=True).exists()
 
-# Состояния для регистрации пользователя
-class Registration(StatesGroup):
-    name = State()
-    address = State()
 
-# Блокировка пользователя
-@dp.message_handler(commands=['block'], user_id=ADMIN_ID)
+@sync_to_async
+def is_user_authorized(user_id):
+    return TelegramUser.objects.filter(telegram_id=user_id).exists()
+
+
+@sync_to_async
+def block_user_by_id(user_id):
+    TelegramUser.objects.update_or_create(
+        telegram_id=user_id,
+        defaults={"is_blocked": True},
+    )
+
+
+@sync_to_async
+def unblock_user_by_id(user_id):
+    TelegramUser.objects.filter(telegram_id=user_id).update(is_blocked=False)
+
+
+@sync_to_async
+def ensure_user_exists(user_id, username, first_name, last_name):
+    full_name = " ".join(part for part in [first_name, last_name] if part).strip()
+    TelegramUser.objects.update_or_create(
+        telegram_id=user_id,
+        defaults={
+            "name": full_name or username or "",
+        },
+    )
+
+
+@sync_to_async
+def get_matched_devices(user_input, offset=0):
+    return search_devices_with_total(user_input, limit=PAGE_SIZE, offset=offset)
+
+
+@sync_to_async
+def get_info_text():
+    content, _ = BotContent.objects.get_or_create(
+        code="info",
+        defaults={
+            "title": "Информация",
+            "content": "Текст для кнопки 'Инфо' пока не заполнен. Его можно изменить в Django-админке.",
+        },
+    )
+    return content.content.strip() or "Текст для кнопки 'Инфо' пока не заполнен."
+
+
+@dp.message_handler(commands=["block"], user_id=ADMIN_ID)
 async def block_user(message: types.Message):
     try:
         user_id_to_block = int(message.text.split()[1])
-        cursor.execute('INSERT INTO blocked_users (user_id) VALUES (?)', (user_id_to_block,))
-        conn.commit()
+        await block_user_by_id(user_id_to_block)
         await message.reply(f"Пользователь с ID {user_id_to_block} заблокирован.")
     except (IndexError, ValueError):
         await message.reply("Используйте команду в формате: /block <user_id>")
 
-# Разблокировка пользователя
-def unblock_user(user_id):
-    cursor.execute('DELETE FROM blocked_users WHERE user_id = ?', (user_id,))
-    conn.commit()
 
-# Обработчик команды /unblock
-@dp.message_handler(commands=['unblock'], user_id=ADMIN_ID)
+@dp.message_handler(commands=["unblock"], user_id=ADMIN_ID)
 async def unblock_user_command(message: types.Message):
     try:
         user_id_to_unblock = int(message.text.split()[1])
-        unblock_user(user_id_to_unblock)
+        await unblock_user_by_id(user_id_to_unblock)
         await message.reply(f"Пользователь с ID {user_id_to_unblock} разблокирован.")
     except (IndexError, ValueError):
         await message.reply("Используйте команду в формате: /unblock <user_id>")
 
 
-# Регистрация пользователя
-@dp.message_handler(commands=['register'], state='*')
-async def register_user(message: types.Message):
-    user_id = message.from_user.id
-    if is_user_registered(user_id):
-        await message.reply("Вы уже зарегистрированы.")
-    else:
-        await Registration.name.set()
-        await message.reply("Введите Ваше имя:")
+@dp.message_handler(commands=["info"])
+async def show_info(message: types.Message):
+    info_text = await get_info_text()
+    await message.reply(info_text)
 
-@dp.message_handler(state=Registration.name)
-async def process_name(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        data['name'] = message.text.strip()
-    await Registration.next()
-    await message.reply("Спасибо! Теперь введите название или адрес мастерской:\n\n<i>Ползователь с неверно введенными данными будет заблокирован</i>!", parse_mode=ParseMode.HTML)
 
-@dp.message_handler(state=Registration.address)
-async def process_address(message: types.Message, state: FSMContext):
-    async with state.proxy() as data:
-        data['address'] = message.text.strip()
-
-    user_id = message.from_user.id
-    name = data['name']
-    address = data['address']
-
-    cursor.execute('INSERT INTO users (user_id, name, address) VALUES (?, ?, ?)', (user_id, name, address))
-    conn.commit()
-
-    await state.finish()
-    await message.reply("Регистрация завершена! Теперь вы можете узнать стоимость замены стекла.")
-
-# Обработчик команды /start
-@dp.message_handler(commands=['start'])
-async def send_welcome(message: types.Message):
-    user_id = message.from_user.id
-    if is_user_blocked(user_id):
-        await message.reply("Вы не можете использовать этого бота.\nВведенные данные при регистрации не соответствуют реальности,\n или Вы не являетесь моим клиентом \nДля разблокировки напишите @Yur1on")
+@dp.callback_query_handler(lambda call: call.data.startswith("more:"))
+async def show_more_results(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    state = pagination_state.get(user_id)
+    if not state:
+        await call.answer("Сначала выполните новый поиск.", show_alert=True)
         return
 
-    if not is_user_registered(user_id):
-        await message.reply("Для начала работы ответьте на 2 вопроса использовав команду /register.")
-    else:
-        await message.reply("Введи модель телефона, чтобы узнать стоимость замены стекла.")
+    expected_offset = int(call.data.split(":", 1)[1])
+    if state["offset"] != expected_offset:
+        await call.answer("Эта кнопка уже устарела. Выполните поиск заново.", show_alert=True)
+        return
 
-# Обработчик запросов на стоимость замены стекла
+    await call.answer()
+    await send_search_results(
+        message=call.message,
+        user_input=state["query"],
+        offset=state["offset"],
+        is_followup=True,
+    )
+
+
+async def send_search_results(message: types.Message, user_input: str, offset: int = 0, is_followup: bool = False):
+    matched_devices, total = await get_matched_devices(user_input, offset)
+    user_id = message.chat.id
+
+    if matched_devices:
+        response_parts = []
+        for device in matched_devices:
+            lines = [
+                f"📱 <b>Модель:</b> {escape(device.model_name)}",
+                f"🔧 <b>Только переклейка стекла:</b> {format_price(device.glass_replacement_price)}$",
+                f"🛠 <b>Выклейка и переклейка:</b> {format_price(device.glass_replacement_without_disassembly_price)}$",
+            ]
+            if device.turnkey_price is not None:
+                lines.append(f"✅ <b>Переклейка под ключ:</b> {format_price(device.turnkey_price)}$")
+            else:
+                lines.append("✅ <b>Переклейка под ключ:</b> договорная")
+
+            display_lines = []
+            for display in device.display_options.all():
+                if display.stock <= 0:
+                    continue
+                display_label = "Оригинал" if display.display_type == "original" else "Копия"
+                display_lines.append(f"{display_label}: {format_price(display.price)}$ ({display.stock} шт.)")
+
+            if display_lines:
+                lines.append("")
+                lines.append("🖥 <b>Дисплеи в наличии:</b>")
+                lines.extend(display_lines)
+
+            response_parts.append("\n".join(lines))
+
+        shown_from = offset + 1
+        shown_to = offset + len(matched_devices)
+        header = ""
+        if total > PAGE_SIZE:
+            header = f"Найдено: <b>{total}</b>. Показаны результаты <b>{shown_from}-{shown_to}</b>.\n\n"
+
+        response = header + "\n\n━━━━━━━━━━━━━━\n\n".join(response_parts)
+
+        has_more = shown_to < total
+        inline_keyboard = None
+        if has_more:
+            response += "\n\n<b>Можно посмотреть следующие 4 по кнопке ниже или введите модель точнее.</b>"
+            pagination_state[user_id] = {"query": user_input, "offset": shown_to}
+            inline_keyboard = get_more_inline_keyboard(shown_to)
+        else:
+            pagination_state.pop(user_id, None)
+
+        response += "\n\n📍 <b>Гагарина 55</b>\n✉️ @Yur1on"
+        await message.reply(
+            response,
+            parse_mode=ParseMode.HTML,
+            reply_markup=inline_keyboard,
+        )
+        return
+
+    pagination_state.pop(user_id, None)
+    normalized_input = normalize_text(user_input)
+    logger.info("No matches for query '%s' (%s)", user_input, normalized_input)
+    response = (
+        "Нет информации по данной модели.\n"
+        "Попробуйте изменить поиск сократив его до модели.\n"
+        "Пример: a50, redmi 12"
+    )
+    if is_followup:
+        response = "Больше результатов нет. Введите модель точнее для нового поиска."
+    await message.reply(response, parse_mode=ParseMode.HTML)
+
+
+@dp.message_handler(commands=["start"])
+async def send_welcome(message: types.Message):
+    user_id = message.from_user.id
+    await ensure_user_exists(
+        user_id=user_id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+    )
+
+    if await is_user_blocked(user_id):
+        await message.reply(
+            "Вы не можете использовать этого бота.\n"
+            "Вы были ограничены администратором.\n"
+            "Для разблокировки напишите @Yur1on",
+        )
+        return
+
+    await message.reply(
+        "Введи модель телефона, чтобы узнать стоимость замены стекла.",
+    )
+
+
+
+
 @dp.message_handler()
 async def price_query(message: types.Message):
     user_id = message.from_user.id
 
-    if is_user_blocked(user_id):
-        await message.reply("Вы не можете использовать этого бота.\nВведенные данные при регистрации не соответствуют реальности,\n или Вы не являетесь моим клиентом \nДля разблокировки напишите @Yur1on")
+    if await is_user_blocked(user_id):
+        await message.reply(
+            "Вы не можете использовать этого бота.\n"
+            "Вы были ограничены администратором.\n"
+            "Для разблокировки напишите @Yur1on",
+        )
         return
 
-    if not is_user_registered(user_id):
-        await message.reply("Для начала работы ответьте на 2 вопроса использовав команду /register.")
+    if not await is_user_authorized(user_id):
+        await message.reply(
+            "Сначала нажмите /start, чтобы авторизоваться и начать работу с ботом.",
+        )
         return
 
     user_input = message.text.strip().lower()
 
-    # Проверка на наличие кириллических символов
     if contains_cyrillic(user_input):
         await message.reply("Пожалуйста, введите модель телефона на английском языке.")
         return
 
-    # Проверка на слово "techno"
-    if "techno" in user_input:
-        await message.reply("❗Повторите запрос исправив слово <b>'techno'</b> на правельное написание <b>tecno</b>.", parse_mode=ParseMode.HTML)
-        return
-    # Проверка на слово "comon"
-    if "comon" in user_input:
-        await message.reply("❗Повторите запрос исправив слово <b>'comon'</b> на правельное написание <b>camon</b>.", parse_mode=ParseMode.HTML)
-        return
-    # Проверка на слово "realmi"
-    if "realmi" in user_input:
-        await message.reply("❗Повторите запрос исправив слово <b>'realmi'</b> на правельное написание <b>realme</b>.", parse_mode=ParseMode.HTML)
-        return
-
-    # Проверка на слово "tekno"
-    if "tekno" in user_input:
-        await message.reply("❗Повторите запрос исправив слово <b>'tekno'</b> на правельное написание <b>tecno</b>.", parse_mode=ParseMode.HTML)
-        return
-
-    # Проверка на символ "+"
-    if "+" in user_input:
-        await message.reply("❗Повторите запрос исправив знак <b>'+'</b> на слово <b>plus</b>.", parse_mode=ParseMode.HTML)
-        return
-
-    # Логирование запроса пользователя
-    log_user_query(user_id, user_input)
-
-    normalized_input = normalize_text(user_input)
-    matched_models = []
-
-    for model, details in prices.items():
-        normalized_model = normalize_text(model)
-        if normalized_input in normalized_model:
-            matched_models.append((model, details))
-            if len(matched_models) == 4:
-                break
-
-    if matched_models:
-        response = ""
-        for idx, (model, details) in enumerate(matched_models):
-            display_info = displays.get(model, None)
-            display_info1 = displays1.get(model, None)
-            response += (
-                f"*Модель:* __{model}__\n"
-                f"*Только переклейка стекла:* {details['replacement']}$\n"
-                f"*Выклейка и переклейка:* {details['without_disassembly']}$\n"
+    typo_checks = {
+        "techno": "tecno",
+        "comon": "camon",
+        "realmi": "realme",
+        "tekno": "tecno",
+    }
+    for wrong, correct in typo_checks.items():
+        if wrong in user_input:
+            await message.reply(
+                f"❗Повторите запрос исправив слово <b>'{wrong}'</b> на правельное написание <b>{correct}</b>.",
+                parse_mode=ParseMode.HTML,
             )
-            if details['key'] > 0:
-                response += f"*Переклейка под ключ:* {details['key']}$\n\n"
-            else:
-                response += "*Переклейка под ключ:* договорная\n\n"
+            return
 
-            if display_info and display_info['stock'] > 0:
-                response += (
-                    f"*🔘Дисплей в наличии:* оригинал\n"
-                    f"*Стоимость дисплея:* {display_info['price']}$\n"
-                    f"*Количество на складе:* {display_info['stock']}\n\n"
-                )
-            if display_info1 and display_info1['stock'] > 0:
-                response += (
-                    f"*Дисплей в наличии:* копия \n"
-                    f"*Стоимость дисплея:* {display_info1['price']}$\n"
-                    f"*Количество на складе:* {display_info1['stock']}\n\n"
-                )
+    if "+" in user_input:
+        await message.reply(
+            "❗Повторите запрос исправив знак <b>'+'</b> на слово <b>plus</b>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
 
-            # Добавляем разделительную линию, если это не последний результат
-            if idx < len(matched_models) - 1:
-                response += "------------------------------\n\n"
+    await log_user_query(user_id, user_input)
+    await send_search_results(message=message, user_input=user_input, offset=0)
 
-        # Добавляем строку с адресом только в конце последнего результата
-        response += "*Гагарина 55, @Yur1on*\n\n"
-    else:
-        response = "Нет информации по данной модели.\nПопробуйте изменить поиск сократив его до модели.\nПример: a50, redmi 12"
 
-    await message.reply(response, parse_mode=ParseMode.MARKDOWN)
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
-
-
-
